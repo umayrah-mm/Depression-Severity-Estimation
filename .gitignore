@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+AVEC2014_processed/
+*.pt
+*.npy
+*.npz
