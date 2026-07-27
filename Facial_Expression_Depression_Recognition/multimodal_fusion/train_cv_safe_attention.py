@@ -11,9 +11,12 @@ Extra safety for this model specifically (since attention has more
 capacity to overfit than the MoE gate):
     - weight_decay added to the optimizer (gently discourages the model
       from relying too heavily on any single number)
-    - dropout already set to 0.4 in models_attention.py (vs 0.3 for MoE)
+    - dropout set to 0.6 in models_attention.py (Round 3, final settings)
 
 Compares final result against your MoE ensemble (MAE 7.7283).
+
+Saves final metrics to results_attention_cv.txt so they're never lost
+even if the terminal is closed or scrolled past.
 
 Run:
     python train_cv_safe_attention.py
@@ -32,7 +35,7 @@ from models_attention import DepressionPredictionModelAttention, MODALITY_ORDER,
 
 N_FOLDS = 5
 PATIENCE = 15
-WEIGHT_DECAY = 1.e-2  # extra anti-overfitting safeguard for this model
+WEIGHT_DECAY = 1e-2  # Round 3, final settings - best balance of stability and accuracy
 
 
 def concordance_ccc(y_true, y_pred):
@@ -201,6 +204,19 @@ def main():
     print(f"{'Metric':<8}{'MoE ensemble (today, best)':<28}{'Attention ensemble (new)':<26}")
     for key in ["MAE", "RMSE", "PCC", "CCC"]:
         print(f"{key:<8}{moe_ensemble[key]:<28.4f}{ensemble_metrics[key]:<26.4f}")
+
+    # ---- Save results to a file so they're never lost, even if the ----
+    # ---- terminal window gets closed or scrolled past. ----
+    results_path = config.MOE_FUSION_BRANCH_DIR / "results_attention_cv.txt"
+    with open(results_path, "w") as f:
+        f.write("Self-attention fusion, 5-fold cross-validated ensemble\n")
+        f.write(f"Settings: dropout=0.6, weight_decay={WEIGHT_DECAY}\n")
+        f.write(f"Testing samples: {len(test_ds)}\n")
+        f.write(f"Per-fold MAE: mean={fold_maes.mean():.4f}  std={fold_maes.std():.4f}\n\n")
+        f.write(f"{'Metric':<8}{'Value':<12}\n")
+        for key in ["MAE", "RMSE", "PCC", "CCC"]:
+            f.write(f"{key:<8}{ensemble_metrics[key]:<12.4f}\n")
+    print(f"\nResults saved to: {results_path}")
 
 
 if __name__ == "__main__":

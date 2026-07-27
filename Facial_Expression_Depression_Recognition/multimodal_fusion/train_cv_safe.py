@@ -12,6 +12,9 @@ predictions are averaged together (ensembling).
 This guarantees the final comparison against your original MAE 8.15 is
 completely fair and honest.
 
+Saves final metrics to results_moe_cv.txt so they're never lost even
+if the terminal is closed or scrolled past.
+
 Run:
     python train_cv_safe.py
 """
@@ -162,6 +165,7 @@ def main():
 
     all_fold_preds = []
     y_true_final = None
+    per_fold_metrics = []
 
     for fold_path in fold_model_paths:
         model = DepressionPredictionModel().to(device)
@@ -180,7 +184,11 @@ def main():
         y_true_final = trues
 
         single_fold_metrics = compute_metrics(trues, preds)
+        per_fold_metrics.append(single_fold_metrics)
         print(f"  {fold_path.name} alone -> MAE={single_fold_metrics['MAE']:.4f}")
+
+    fold_maes = np.array([m["MAE"] for m in per_fold_metrics])
+    print(f"\nPer-fold MAE mean={fold_maes.mean():.4f}  std={fold_maes.std():.4f}")
 
     all_fold_preds = np.array(all_fold_preds)  # (5, 100)
     ensemble_preds = all_fold_preds.mean(axis=0)
@@ -192,6 +200,18 @@ def main():
     print(f"{'Metric':<8}{'Original (1 model)':<22}{'Ensemble (5 models, no leakage)':<30}")
     for key in ["MAE", "RMSE", "PCC", "CCC"]:
         print(f"{key:<8}{original[key]:<22.4f}{ensemble_metrics[key]:<30.4f}")
+
+    # ---- Save results to a file so they're never lost, even if the ----
+    # ---- terminal window gets closed or scrolled past. ----
+    results_path = config.MOE_FUSION_BRANCH_DIR / "results_moe_cv.txt"
+    with open(results_path, "w") as f:
+        f.write("MoE gate fusion, 5-fold cross-validated ensemble\n")
+        f.write(f"Testing samples: {len(test_ds)}\n")
+        f.write(f"Per-fold MAE: mean={fold_maes.mean():.4f}  std={fold_maes.std():.4f}\n\n")
+        f.write(f"{'Metric':<8}{'Value':<12}\n")
+        for key in ["MAE", "RMSE", "PCC", "CCC"]:
+            f.write(f"{key:<8}{ensemble_metrics[key]:<12.4f}\n")
+    print(f"\nResults saved to: {results_path}")
 
 
 if __name__ == "__main__":
