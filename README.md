@@ -207,6 +207,22 @@ as validated accuracy.
 
 Full detail on each experiment is in `experiments_archive/`.
 
+## Results
+
+Evaluated on AVEC2014 (BDI-II depression severity, 0-63 scale), Testing
+split, 5-fold cross-validated ensemble unless noted.
+
+| Model | MAE ↓ | RMSE ↓ | PCC ↑ | CCC ↑ |
+|---|---|---|---|---|
+| Reproduced baseline (single split) | 8.15 | 9.90 | 0.54 | 0.49 |
+| MoE gate, 5-fold ensemble | 7.73 | 10.00 | 0.51 | 0.45 |
+| **Self-attention fusion, 5-fold ensemble (best)** | **7.33** | **9.58** | **0.58** | **0.55** |
+
+Lower is better for MAE/RMSE; higher is better for PCC/CCC. With
+~297 aligned samples, treat MAE differences smaller than ~0.4 points
+between variants as within normal cross-validation noise rather than
+confirmed improvements (see Known Limitations).
+
 ## Known limitations
 
 - Trained and validated on AVEC2014 (German/English-speaking subjects).
