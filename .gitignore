@@ -5,3 +5,4 @@ AVEC2014_processed/
 *.pt
 *.npy
 *.npz
+.vscode/
