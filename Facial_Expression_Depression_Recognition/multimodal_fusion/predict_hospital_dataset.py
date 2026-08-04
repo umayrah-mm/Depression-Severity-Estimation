@@ -111,6 +111,7 @@ def extract_clip(frame_paths, clip_model, preprocess, device, max_frames):
 
 def extract_rppg(frame_paths):
     from scipy.signal import butter, filtfilt, welch, find_peaks
+    from scipy.integrate import trapezoid
 
     def bandpass(signal, fs=3, low=0.6, high=1.4, order=3):
         nyq = 0.5 * fs
@@ -143,8 +144,8 @@ def extract_rppg(frame_paths):
 
     lf_band = (freqs >= 0.04) & (freqs < 0.15)
     hf_band = (freqs >= 0.15) & (freqs <= 0.4)
-    lf = np.trapz(power[lf_band], freqs[lf_band]) if lf_band.any() else 0
-    hf = np.trapz(power[hf_band], freqs[hf_band]) if hf_band.any() else 0
+    lf = trapezoid(power[lf_band], freqs[lf_band]) if lf_band.any() else 0
+    hf = trapezoid(power[hf_band], freqs[hf_band]) if hf_band.any() else 0
     lf_hf = lf / (hf + 1e-8)
 
     return np.array([hr, rr_mean, sdnn, rmssd, lf, hf, lf_hf, np.std(filtered), 1.0], dtype=np.float32)
@@ -203,11 +204,22 @@ def main():
             continue
         clip_obj.close()
 
+        # NOTE: stats["*_mean"] and stats["*_std"] are saved with shape
+        # (1, D), so subtracting them from a (D,) array already produces a
+        # (1, D) result via broadcasting. We must NOT unsqueeze on top of
+        # that, or we end up with an incorrect (1, 1, D) shape that breaks
+        # the attention layer downstream. reshape(1, -1) guarantees the
+        # correct final shape regardless of what broadcasting produced.
+        visual_norm = (visual - stats["visual_X_mean"]) / stats["visual_X_std"]
+        rppg_norm = (rppg_feat - stats["rppg_X_mean"]) / stats["rppg_X_std"]
+        clip_norm = (clip_feat - stats["clip_X_mean"]) / stats["clip_X_std"]
+        smile_norm = (smile_feat - stats["smile_X_mean"]) / stats["smile_X_std"]
+
         batch = {
-            "visual": torch.tensor((visual - stats["visual_X_mean"]) / stats["visual_X_std"], dtype=torch.float32).unsqueeze(0).to(device),
-            "rppg": torch.tensor((rppg_feat - stats["rppg_X_mean"]) / stats["rppg_X_std"], dtype=torch.float32).unsqueeze(0).to(device),
-            "clip": torch.tensor((clip_feat - stats["clip_X_mean"]) / stats["clip_X_std"], dtype=torch.float32).unsqueeze(0).to(device),
-            "smile": torch.tensor((smile_feat - stats["smile_X_mean"]) / stats["smile_X_std"], dtype=torch.float32).unsqueeze(0).to(device),
+            "visual": torch.tensor(visual_norm, dtype=torch.float32).reshape(1, -1).to(device),
+            "rppg": torch.tensor(rppg_norm, dtype=torch.float32).reshape(1, -1).to(device),
+            "clip": torch.tensor(clip_norm, dtype=torch.float32).reshape(1, -1).to(device),
+            "smile": torch.tensor(smile_norm, dtype=torch.float32).reshape(1, -1).to(device),
         }
 
         with torch.no_grad():
