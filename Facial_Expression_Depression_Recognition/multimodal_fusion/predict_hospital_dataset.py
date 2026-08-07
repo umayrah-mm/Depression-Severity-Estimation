@@ -2,10 +2,13 @@
 predict_hospital_dataset.py
 
 Scans a Hospital_Data-shaped folder and generates predictions using a
-model TRAINED ON HOSPITAL_DATA ITSELF (from train_hospital.py) - not
-the original AVEC2014 model. Predictions are now genuinely on the
-HAMD scale, directly comparable to true_HAMD, since the model was
-trained on HAMD labels.
+model TRAINED ON HOSPITAL_DATA ITSELF (from train_hospital.py).
+
+Reuses the feature cache built by extract_hospital_features.py
+(<root>\\feature_cache\\<video_id>.npz) instead of re-extracting
+features from scratch - if a video's features are already cached,
+they're loaded directly; only videos with no cache entry get
+extracted fresh (and then cached for next time).
 
 Requires hospital_model.pt and hospital_normalization_stats.npz to
 already exist (produced by train_hospital.py).
@@ -150,6 +153,56 @@ def extract_rppg(frame_paths):
     return np.array([hr, rr_mean, sdnn, rmssd, lf, hf, lf_hf, np.std(filtered), 1.0], dtype=np.float32)
 
 
+def extract_fresh(record, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root):
+    """Extracts all 4 modalities for one video from scratch (no cache hit)."""
+    tmp_dir = tmp_root / record.video_id
+    frame_paths = extract_frames_from_video(record.path, tmp_dir)
+    print(f"  {len(frame_paths)} frames extracted")
+
+    visual = extract_visual(frame_paths, mobilenet, device)
+    clip_feat = extract_clip(frame_paths, clip_model, clip_preprocess, device, config.MAX_FRAMES_FOR_CLIP)
+    rppg_feat = extract_rppg(frame_paths)
+
+    audio_path = tmp_dir / "audio.wav"
+    clip_obj = VideoFileClip(str(record.path))
+    if clip_obj.audio is None:
+        clip_obj.close()
+        return None
+    clip_obj.audio.write_audiofile(str(audio_path), fps=config.AUDIO_SAMPLE_RATE, nbytes=2, codec="pcm_s16le", logger=None)
+    smile_feat = smile.process_file(str(audio_path)).iloc[0].to_numpy(dtype=np.float32)
+    clip_obj.close()
+
+    return visual, rppg_feat, clip_feat, smile_feat
+
+
+def get_features_for_video(record, cache_dir, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root):
+    """
+    Checks feature_cache first (built by extract_hospital_features.py).
+    Loads from cache if present - otherwise extracts fresh and saves to
+    cache for next time.
+    """
+    cache_path = cache_dir / f"{record.video_id}.npz"
+
+    if cache_path.exists():
+        print(f"  Using cached features (from extract_hospital_features.py)")
+        data = np.load(cache_path, allow_pickle=True)
+        return data["visual"], data["rppg"], data["clip"], data["smile"]
+
+    print(f"  Not cached - extracting fresh...")
+    result = extract_fresh(record, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root)
+    if result is None:
+        return None
+
+    visual, rppg_feat, clip_feat, smile_feat = result
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        cache_path,
+        visual=visual, rppg=rppg_feat, clip=clip_feat, smile=smile_feat,
+        label=record.label, split=record.split, video_id=record.video_id,
+    )
+    return visual, rppg_feat, clip_feat, smile_feat
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True, help="Path to Hospital_Data root folder")
@@ -157,6 +210,7 @@ def main():
     args = parser.parse_args()
 
     root = Path(args.root)
+    cache_dir = root / "feature_cache"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
@@ -196,24 +250,12 @@ def main():
     for record in records:
         print(f"\n--- {record.video_id} ({record.split}) ---")
 
-        tmp_dir = tmp_root / record.video_id
-        frame_paths = extract_frames_from_video(record.path, tmp_dir)
-        print(f"  {len(frame_paths)} frames extracted")
-
-        visual = extract_visual(frame_paths, mobilenet, device)
-        clip_feat = extract_clip(frame_paths, clip_model, clip_preprocess, device, config.MAX_FRAMES_FOR_CLIP)
-        rppg_feat = extract_rppg(frame_paths)
-
-        audio_path = tmp_dir / "audio.wav"
-        clip_obj = VideoFileClip(str(record.path))
-        if clip_obj.audio is not None:
-            clip_obj.audio.write_audiofile(str(audio_path), fps=config.AUDIO_SAMPLE_RATE, nbytes=2, codec="pcm_s16le", logger=None)
-            smile_feat = smile.process_file(str(audio_path)).iloc[0].to_numpy(dtype=np.float32)
-        else:
+        features = get_features_for_video(record, cache_dir, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root)
+        if features is None:
             print("  WARNING: no audio track, skipping")
-            clip_obj.close()
             continue
-        clip_obj.close()
+
+        visual, rppg_feat, clip_feat, smile_feat = features
 
         visual_norm = (visual - stats["visual_X_mean"]) / stats["visual_X_std"]
         rppg_norm = (rppg_feat - stats["rppg_X_mean"]) / stats["rppg_X_std"]
