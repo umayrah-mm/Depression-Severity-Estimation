@@ -71,7 +71,7 @@ RPPG_FEATURES_CSV = DATA_ROOT / "rppg_features.csv"
 ALIGNED_DATA_DIR = OUTPUTS_ROOT / "aligned_dataset"
 MOE_FUSION_BRANCH_DIR = OUTPUTS_ROOT / "moe_fusion_branch"
 VISUAL_RAW_BRANCH_DIR = OUTPUTS_ROOT / "visual_branch_raw"
-
+BASELINE_CV_DIR = OUTPUTS_ROOT / "baseline_cv_branch"
 # ---------------------------------------------------------------------------
 # Model / training hyperparameters
 # ---------------------------------------------------------------------------

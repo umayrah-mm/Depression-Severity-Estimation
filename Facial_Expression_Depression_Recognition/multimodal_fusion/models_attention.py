@@ -1,7 +1,7 @@
 """
 models_attention.py
 
-A small, heavily-regularized ATTENTION-based fusion architecture, as an
+A small, heavily-regularaized ATTENTION-based fusion architecture, as an
 alternative to the weighted-average MoE gate in models.py.
 
 Idea: instead of blending modalities with a simple weighted average,
