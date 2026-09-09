@@ -1,22 +1,24 @@
 """
 predict_hospital_dataset.py
 
-Generalized version of experiments_archive/predict_new_dataset.py:
-scans a Hospital_Data-shaped folder (any number of videos, via
-hospital_data_loader.py) instead of a hardcoded 2-video list, extracts
-all 4 modalities for each video, normalizes with your ORIGINAL AVEC2014
-training statistics, and predicts BDI-II-scale severity scores.
+Scans a Hospital_Data-shaped folder and generates predictions using a
+model TRAINED ON HOSPITAL_DATA ITSELF (from train_hospital.py).
 
-IMPORTANT: this dataset's labels are on the HAMD scale, not BDI-II.
-Predictions here are exploratory - not directly comparable to HAMD
-ground truth without a separate calibration step.
+Reuses the feature cache built by extract_hospital_features.py
+(<root>\\feature_cache\\<video_id>.npz) instead of re-extracting
+features from scratch - if a video's features are already cached,
+they're loaded directly; only videos with no cache entry get
+extracted fresh (and then cached for next time).
+
+Requires hospital_model.pt and hospital_normalization_stats.npz to
+already exist (produced by train_hospital.py).
 
 Run:
-    python predict_hospital_dataset.py --root "E:\\path\\to\\Hospital_Data"
-    python predict_hospital_dataset.py --root "E:\\path\\to\\Hospital_Data" --limit 3
+    python predict_hospital_dataset.py --root "E:\\Data\\Hospital_Data"
+    python predict_hospital_dataset.py --root "E:\\Data\\Hospital_Data" --limit 3
 
 Outputs:
-    <root>\\predictions.csv   (video_id, split, true_HAMD, predicted_BDI_II)
+    <root>\\predictions.csv   (video_id, split, true_HAMD, predicted_HAMD)
 """
 
 import argparse
@@ -151,17 +153,69 @@ def extract_rppg(frame_paths):
     return np.array([hr, rr_mean, sdnn, rmssd, lf, hf, lf_hf, np.std(filtered), 1.0], dtype=np.float32)
 
 
+def extract_fresh(record, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root):
+    """Extracts all 4 modalities for one video from scratch (no cache hit)."""
+    tmp_dir = tmp_root / record.video_id
+    frame_paths = extract_frames_from_video(record.path, tmp_dir)
+    print(f"  {len(frame_paths)} frames extracted")
+
+    visual = extract_visual(frame_paths, mobilenet, device)
+    clip_feat = extract_clip(frame_paths, clip_model, clip_preprocess, device, config.MAX_FRAMES_FOR_CLIP)
+    rppg_feat = extract_rppg(frame_paths)
+
+    audio_path = tmp_dir / "audio.wav"
+    clip_obj = VideoFileClip(str(record.path))
+    if clip_obj.audio is None:
+        clip_obj.close()
+        return None
+    clip_obj.audio.write_audiofile(str(audio_path), fps=config.AUDIO_SAMPLE_RATE, nbytes=2, codec="pcm_s16le", logger=None)
+    smile_feat = smile.process_file(str(audio_path)).iloc[0].to_numpy(dtype=np.float32)
+    clip_obj.close()
+
+    return visual, rppg_feat, clip_feat, smile_feat
+
+
+def get_features_for_video(record, cache_dir, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root):
+    """
+    Checks feature_cache first (built by extract_hospital_features.py).
+    Loads from cache if present - otherwise extracts fresh and saves to
+    cache for next time.
+    """
+    cache_path = cache_dir / f"{record.video_id}.npz"
+
+    if cache_path.exists():
+        print(f"  Using cached features (from extract_hospital_features.py)")
+        data = np.load(cache_path, allow_pickle=True)
+        return data["visual"], data["rppg"], data["clip"], data["smile"]
+
+    print(f"  Not cached - extracting fresh...")
+    result = extract_fresh(record, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root)
+    if result is None:
+        return None
+
+    visual, rppg_feat, clip_feat, smile_feat = result
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        cache_path,
+        visual=visual, rppg=rppg_feat, clip=clip_feat, smile=smile_feat,
+        label=record.label, split=record.split, video_id=record.video_id,
+    )
+    return visual, rppg_feat, clip_feat, smile_feat
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True, help="Path to Hospital_Data root folder")
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N videos (for testing)")
     args = parser.parse_args()
 
+    root = Path(args.root)
+    cache_dir = root / "feature_cache"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
-    print(f"\nScanning {args.root} ...")
-    records = scan_hospital_data(args.root)
+    print(f"\nScanning {root} ...")
+    records = scan_hospital_data(root)
     if args.limit:
         records = records[: args.limit]
     print(f"Processing {len(records)} video(s).")
@@ -173,43 +227,36 @@ def main():
         p.requires_grad = False
     smile = opensmile.Smile(feature_set=opensmile.FeatureSet.eGeMAPSv02, feature_level=opensmile.FeatureLevel.Functionals)
 
-    stats = np.load(config.ALIGNED_DATA_DIR / "normalization_stats.npz")
+    # ---- Load the HOSPITAL-TRAINED model and stats, not the AVEC2014 ones ----
+    stats_path = root / "hospital_normalization_stats.npz"
+    model_path = root / "hospital_model.pt"
+
+    if not stats_path.exists() or not model_path.exists():
+        raise FileNotFoundError(
+            f"Could not find {stats_path} or {model_path}. "
+            f"Run train_hospital.py first to produce these."
+        )
+
+    stats = np.load(stats_path)
 
     model = DepressionPredictionModelAttention().to(device)
-    model.load_state_dict(torch.load(config.MOE_FUSION_BRANCH_DIR / "cv_safe_attention_final_fold1.pt", map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
+    print(f"Loaded hospital-trained model from: {model_path}")
 
-    tmp_root = Path(args.root) / "_tmp_frames"
+    tmp_root = root / "_tmp_frames"
     results = []
 
     for record in records:
         print(f"\n--- {record.video_id} ({record.split}) ---")
 
-        tmp_dir = tmp_root / record.video_id
-        frame_paths = extract_frames_from_video(record.path, tmp_dir)
-        print(f"  {len(frame_paths)} frames extracted")
-
-        visual = extract_visual(frame_paths, mobilenet, device)
-        clip_feat = extract_clip(frame_paths, clip_model, clip_preprocess, device, config.MAX_FRAMES_FOR_CLIP)
-        rppg_feat = extract_rppg(frame_paths)
-
-        audio_path = tmp_dir / "audio.wav"
-        clip_obj = VideoFileClip(str(record.path))
-        if clip_obj.audio is not None:
-            clip_obj.audio.write_audiofile(str(audio_path), fps=config.AUDIO_SAMPLE_RATE, nbytes=2, codec="pcm_s16le", logger=None)
-            smile_feat = smile.process_file(str(audio_path)).iloc[0].to_numpy(dtype=np.float32)
-        else:
+        features = get_features_for_video(record, cache_dir, mobilenet, clip_model, clip_preprocess, smile, device, tmp_root)
+        if features is None:
             print("  WARNING: no audio track, skipping")
-            clip_obj.close()
             continue
-        clip_obj.close()
 
-        # NOTE: stats["*_mean"] and stats["*_std"] are saved with shape
-        # (1, D), so subtracting them from a (D,) array already produces a
-        # (1, D) result via broadcasting. We must NOT unsqueeze on top of
-        # that, or we end up with an incorrect (1, 1, D) shape that breaks
-        # the attention layer downstream. reshape(1, -1) guarantees the
-        # correct final shape regardless of what broadcasting produced.
+        visual, rppg_feat, clip_feat, smile_feat = features
+
         visual_norm = (visual - stats["visual_X_mean"]) / stats["visual_X_std"]
         rppg_norm = (rppg_feat - stats["rppg_X_mean"]) / stats["rppg_X_std"]
         clip_norm = (clip_feat - stats["clip_X_mean"]) / stats["clip_X_std"]
@@ -226,15 +273,14 @@ def main():
             pred, _ = model(batch)
 
         pred_score = pred.item()
-        print(f"  Predicted (BDI-II scale): {pred_score:.2f}   |   True label (HAMD scale): {record.label}")
-        results.append({"video_id": record.video_id, "split": record.split, "true_HAMD": record.label, "predicted_BDI_II_scale": pred_score})
+        print(f"  Predicted (HAMD scale): {pred_score:.2f}   |   True label (HAMD scale): {record.label}")
+        results.append({"video_id": record.video_id, "split": record.split, "true_HAMD": record.label, "predicted_HAMD": pred_score})
 
-    out_path = Path(args.root) / "predictions.csv"
+    out_path = root / "predictions.csv"
     pd.DataFrame(results).to_csv(out_path, index=False)
     print(f"\nSaved: {out_path}")
-    print("\nNOTE: predicted values are on the BDI-II scale (0-63); true_HAMD is on")
-    print("a DIFFERENT scale. Do not compare these numbers directly without a")
-    print("calibration step. Treat this as exploratory, not validated accuracy.")
+    print("\nThis model was trained directly on your Hospital_Data HAMD labels,")
+    print("so predicted_HAMD and true_HAMD are on the SAME scale and directly comparable.")
 
 
 if __name__ == "__main__":
