@@ -2,12 +2,17 @@
 
 Extends LightFusionNet — a lightweight facial-video + rPPG depression
 severity estimator — with a frozen CLIP visual-semantic encoder and
-openSMILE acoustic features, fused via a modality-adaptive gate (MoE)
-and a self-attention fusion mechanism.
+openSMILE acoustic features, fused via three alternative mechanisms: a
+modality-adaptive gate (MoE), a self-attention fusion mechanism, and an
+evidence-based (uncertainty-weighted) fusion mechanism.
 
 **Best result:** MAE 7.33 (self-attention fusion, 5-fold cross-validated
 ensemble) vs. reproduced baseline MAE 8.10, on the AVEC2014 dataset
-(BDI-II depression severity, 0-63 scale).
+(BDI-II depression severity, 0-63 scale). A newer evidence-based fusion
+model ties this result on MAE (7.29) with substantially more stable
+per-fold performance, and is the only one of the three fusion mechanisms
+that degrades gracefully when one or two modalities are missing at
+inference time (see Section 3b).
 
 This is a research prototype for estimating depression severity scores
 from behavioural and physiological patterns. It is **not** a clinical
@@ -96,10 +101,16 @@ python dataset.py
 
 python train_cv_safe_attention.py
 
-- Step D (alternative): simpler MoE gate architecture, MAE 7.73
+- Step D (alternative 1): simpler MoE gate architecture, MAE 7.73
 
 python train_cv_safe.py
 
+- Step D (alternative 2): evidence-based (uncertainty-weighted) fusion,
+  MAE 7.29 with far more stable per-fold results and the ability to
+  degrade gracefully if a modality is missing at inference time (see
+  Section 3b) - trades a small amount of PCC/CCC for this
+
+python train_cv_safe_evidence.py
 
 **What Step D actually does:** trains 5 models using GroupKFold
 cross-validation (grouped by subject ID, so no one person's data ever
@@ -117,6 +128,48 @@ python evaluate.py
 # single-model evaluation + gate weights
 python combine_ensembles.py 
 # checks if combining both trained ensembles helps
+
+---
+
+## 3b. Missing-modality robustness (evidence fusion only)
+
+Only the evidence-based fusion model (`models_evidence.py`) is designed
+to handle a modality being unavailable at inference time - the MoE and
+self-attention models assume all 4 modalities are always present and
+have not been tested otherwise.
+
+After training with `train_cv_safe_evidence.py`, run:
+
+python evaluate_missing_modality_robustness.py
+
+**What this does:** loads the 5 trained fold checkpoints (no retraining)
+and re-evaluates the ensemble on the real, held-out Testing split under
+all 11 combinations of 0, 1, or 2 modalities being missing, using
+inverse-variance-weighted fusion to automatically down-weight whichever
+modalities are unavailable. Results save to
+`outputs/evidence_branch/results_missing_modality_robustness.txt`.
+
+**Result summary** (5-fold ensemble, 100 Testing samples):
+
+| Scenario | MAE |
+|---|---|
+| None missing (baseline) | 7.29 |
+| Missing: rppg | 7.26 |
+| Missing: visual | 7.35 |
+| Missing: smile | 7.40 |
+| Missing: clip | 8.47 |
+| Missing: visual+rppg | 7.29 |
+| Missing: rppg+smile | 7.45 |
+| Missing: visual+smile | 7.58 |
+| Missing: clip+rppg | 8.29 |
+| Missing: clip+smile | 8.71 |
+| Missing: visual+clip | 10.59 |
+
+No scenario collapses catastrophically. The degradation pattern
+independently reproduces the modality-importance ranking from the
+ablation results below (CLIP matters most, rPPG matters least) via a
+completely different method - missing-modality testing rather than
+outright removal-and-retrain.
 
 ---
 
@@ -203,7 +256,11 @@ as validated accuracy.
 
 | Multi-task learning (score + band) | Band accuracy good (0.50), MAE worsened | Not adopted |
 
+| Attention layer feeding into MoE gate | Worse on every metric (7.33 → 8.03) - gate collapsed onto a single modality | Not adopted |
+
 | 5-fold cross-validated ensembling | **Improved** (8.15 → 7.73 MoE / 7.33 attention) | **Adopted** |
+
+| Evidence-based (uncertainty-weighted) fusion | Tied MAE (7.33 → 7.29), far more stable per-fold (std 0.52 → 0.12), but lower PCC/CCC; uniquely supports graceful missing-modality degradation | **Adopted as a separate model choice** - see Section 3b |
 
 Full detail on each experiment is in `experiments_archive/`.
 
@@ -216,12 +273,18 @@ split, 5-fold cross-validated ensemble unless noted.
 |---|---|---|---|---|
 | Reproduced baseline (single split) | 8.15 | 9.90 | 0.54 | 0.49 |
 | MoE gate, 5-fold ensemble | 7.73 | 10.00 | 0.51 | 0.45 |
-| **Self-attention fusion, 5-fold ensemble (best)** | **7.33** | **9.58** | **0.58** | **0.55** |
+| **Self-attention fusion, 5-fold ensemble (best on PCC/CCC)** | **7.33** | **9.58** | **0.58** | **0.55** |
+| Evidence-based fusion, 5-fold ensemble (best on MAE/RMSE/stability) | 7.29 | 9.49 | 0.56 | 0.47 |
 
 Lower is better for MAE/RMSE; higher is better for PCC/CCC. With
 ~297 aligned samples, treat MAE differences smaller than ~0.4 points
 between variants as within normal cross-validation noise rather than
-confirmed improvements (see Known Limitations).
+confirmed improvements (see Known Limitations) - the self-attention vs.
+evidence-fusion MAE difference (7.33 vs 7.29) falls within this noise
+floor and should be read as a tie on that metric specifically; the two
+models are better distinguished by PCC/CCC (attention wins) and by
+per-fold stability and missing-modality robustness (evidence fusion
+wins - see Section 3b).
 
 ## Known limitations
 
@@ -232,10 +295,16 @@ confirmed improvements (see Known Limitations).
 - The rPPG (pulse) modality contributes minimally to predictions -
   confirmed via ablation and PSD-based signal-quality analysis (not a
   data-quality artefact; the signal itself is weakly correlated with
-  severity on this corpus).
+  severity on this corpus), and independently confirmed again via the
+  evidence-fusion missing-modality test (Section 3b), where removing
+  rPPG barely changes MAE.
 - Small dataset (~297 aligned samples): treat MAE differences smaller
   than ~0.4 points between model variants as within normal
   cross-validation noise, not confirmed improvements.
+- The evidence-based fusion model has not yet had its per-sample
+  confidence estimates checked for calibration (i.e. whether predicted
+  uncertainty actually correlates with true error on a per-sample
+  basis) - not yet investigated.
 - The Hospital_Data loader (`predict_hospital_dataset.py`) has not yet
   been run against real video data - see Section 4 for status.
 - This system estimates a severity score from learned statistical
