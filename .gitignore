@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 AVEC2014_processed/
+Facial_Expression_Depression_Recognition/output/
+Facial_Expression_Depression_Recognition/outputs/
 *.pt
 *.npy
 *.npz
+*.wav
 .vscode/
+docs/*.pdf

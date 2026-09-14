@@ -1,0 +1,13 @@
+# composite_visual_fusion runs in the project's existing .venv
+# (torch 2.6.0+cu124 - identical to the WIN/ATLAS environment lock, so the
+# ported extraction code sees the same torchvision / opencv APIs).
+#
+# ONE extra package is needed; install it with --no-deps so pip cannot
+# "fix" it by downgrading torch:
+#     pip install facenet-pytorch==2.6.0 --no-deps
+#
+# Everything else (torch, torchvision, opencv-python, pandas, scikit-learn,
+# numpy, Pillow) is already in the project environment - see the root
+# requirements.txt. This file exists to document the delta, not to be
+# pip-installed directly.
+facenet-pytorch==2.6.0
